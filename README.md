@@ -2,7 +2,15 @@
 
 Implementations of encoder, decoder, and encoder-decoder Transformer architectures in PyTorch, following "Attention Is All You Need" (Vaswani et al., 2017).
 
-## Setup
+## Installation
+
+```bash
+pip install transformers-from-scratch
+```
+
+PyTorch is required but not installed automatically (to allow users to choose their CUDA build). Install it first from [pytorch.org](https://pytorch.org/get-started/locally/).
+
+## Development Setup
 
 ```bash
 python3 -m venv venv
