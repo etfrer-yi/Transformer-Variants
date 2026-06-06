@@ -1,3 +1,19 @@
+"""
+Implementations of encoder, decoder, and encoder-decoder Transformer architectures,
+following the design of "Attention Is All You Need" (Vaswani et al., 2017).
+
+Notation used in shape comments throughout this module:
+  B       — batch size
+  T       — sequence length (generic)
+  T_src   — source sequence length
+  T_tgt   — target sequence length
+  d_model — model embedding dimension
+  d_ff    — feed-forward hidden dimension
+  d_key   — per-head key/query dimension  (= d_model // n_heads)
+  d_val   — per-head value dimension      (= d_model // n_heads)
+
+Mask convention: BoolTensor where True marks positions to ignore (filled with -inf).
+"""
 
 import math
 import torch
@@ -17,10 +33,8 @@ class PositionalEncoding(nn.Module):
         self.register_buffer('pe', pe)
 
     def forward(self, x: Tensor) -> Tensor:
-        # x:           [B, T, d_model]
-        # pe[:, :T]:   [1, T, d_model] → broadcasts over B
-        return x + self.pe[:, :x.size(1)]
-        # output:      [B, T, d_model]
+        # x: [B, T, d_model]
+        return x + self.pe[:, :x.size(1)]  # [B, T, d_model]
 
 
 class FeedForward(nn.Module):
@@ -31,11 +45,49 @@ class FeedForward(nn.Module):
         self.linear2 = nn.Linear(d_ff, d_model)
 
     def forward(self, x: Tensor):
-        # x:        [B, T, d_model]
-        x = self.linear1(x)   # [B, T, d_ff]
-        x = self.gelu(x)      # [B, T, d_ff]
-        x = self.linear2(x)   # [B, T, d_model]
+        # x: [B, T, d_model]
+        x = self.linear1(x)  # [B, T, d_ff]
+        x = self.gelu(x)     # [B, T, d_ff]
+        x = self.linear2(x)  # [B, T, d_model]
         return x
+
+
+class SingleHeadCrossAttention(nn.Module):
+    def __init__(self, d_model: int, d_key: int, d_val: int):
+        super().__init__()
+        self.softmax = nn.Softmax(-1)
+        self.q_proj = nn.Linear(d_model, d_key, bias=False)
+        self.k_proj = nn.Linear(d_model, d_key, bias=False)
+        self.v_proj = nn.Linear(d_model, d_val, bias=False)
+
+    def forward(self, src: Tensor, tgt: Tensor, mask: BoolTensor = None):
+        # src: [B, T_src, d_model], tgt: [B, T_tgt, d_model], mask: [B, 1, T_src] or [B, T_tgt, T_src]
+        Q = self.q_proj(tgt)                                           # [B, T_tgt, d_key]
+        K = self.k_proj(src)                                           # [B, T_src, d_key]
+        V = self.v_proj(src)                                           # [B, T_src, d_val]
+        attn_scores = torch.matmul(Q, K.transpose(-1, -2)) / math.sqrt(K.size(-1))  # [B, T_tgt, T_src]
+        if mask is not None:
+            attn_scores = attn_scores.masked_fill(mask, float('-inf'))
+        return torch.matmul(self.softmax(attn_scores), V)              # [B, T_tgt, d_val]
+
+
+class SingleHeadSelfAttention(nn.Module):
+    def __init__(self, d_model: int, d_key: int, d_val: int):
+        super().__init__()
+        self.softmax = nn.Softmax(-1)
+        self.q_proj = nn.Linear(d_model, d_key, bias=False)
+        self.k_proj = nn.Linear(d_model, d_key, bias=False)
+        self.v_proj = nn.Linear(d_model, d_val, bias=False)
+
+    def forward(self, x: Tensor, mask: BoolTensor = None):
+        # x: [B, T, d_model], mask: [B, T, T] or [1, T, T]
+        Q = self.q_proj(x)                                             # [B, T, d_key]
+        K = self.k_proj(x)                                             # [B, T, d_key]
+        V = self.v_proj(x)                                             # [B, T, d_val]
+        attn_scores = torch.matmul(Q, K.transpose(-1, -2)) / math.sqrt(K.size(-1))  # [B, T, T]
+        if mask is not None:
+            attn_scores = attn_scores.masked_fill(mask, float('-inf'))
+        return torch.matmul(self.softmax(attn_scores), V)              # [B, T, d_val]
 
 
 class MultiHeadCrossAttention(nn.Module):
@@ -48,9 +100,9 @@ class MultiHeadCrossAttention(nn.Module):
         ])
         self.out_proj = nn.Linear(d_model, d_model, bias=False)
 
-    def forward(self, src: Tensor, tgt: Tensor, mask: BoolTensor=None):
-        # src, tgt: [B, T, d_model], [B, T, d_model]
-        return self.out_proj(torch.cat([head(src, tgt, mask) for head in self.heads], dim=-1))
+    def forward(self, src: Tensor, tgt: Tensor, mask: BoolTensor = None):
+        # src: [B, T_src, d_model], tgt: [B, T_tgt, d_model], mask: [B, 1, T_src] or [B, T_tgt, T_src]
+        return self.out_proj(torch.cat([head(src, tgt, mask) for head in self.heads], dim=-1))  # [B, T_tgt, d_model]
 
 
 class MultiHeadSelfAttention(nn.Module):
@@ -63,57 +115,10 @@ class MultiHeadSelfAttention(nn.Module):
         ])
         self.out_proj = nn.Linear(d_model, d_model, bias=False)
 
-    def forward(self, x: Tensor, mask: BoolTensor=None):
-        # x:               [B, T, d_model]
-        # each head(x, mask): [B, T, d_key]   where d_key = d_model // n_heads
-        # cat(..., dim=-1): [B, T, n_heads * d_key] = [B, T, d_model]
-        # out_proj:         [B, T, d_model]
-        return self.out_proj(torch.cat([head(x, mask) for head in self.heads], dim=-1))
-
-
-class SingleHeadCrossAttention(nn.Module):
-    def __init__(self, d_model: int, d_key: int, d_val: int):
-        super().__init__()
-        self.softmax = nn.Softmax(-1)
-
-        self.q_proj = nn.Linear(d_model, d_key, bias=False)
-        self.k_proj = nn.Linear(d_model, d_key, bias=False)
-        self.v_proj = nn.Linear(d_model, d_val, bias=False)
-
-    def forward(self, src: Tensor, tgt: Tensor, mask: BoolTensor = None):
-        # src, tgt: [B, T, d_model], [B, T, d_model]
-        # mask: [B, 1, T_src] or [B, T_tgt, T_src], True = ignore
-        Q, K, V = self.q_proj(tgt), self.k_proj(src), self.v_proj(src)
-        d_key, d_val = K.size(-1), V.size(-1)
-        attn_scores = torch.matmul(Q, torch.transpose(K, -1, -2)) / math.sqrt(d_key)
-        # attn_scores: [B, T_tgt, T_src]
-        if mask is not None:
-            attn_scores = attn_scores.masked_fill(mask, float('-inf'))
-        # softmax(attn_scores): [B, T_tgt, T_src]
-        return torch.matmul(self.softmax(attn_scores), V)
-
-
-class SingleHeadSelfAttention(nn.Module):
-    def __init__(self, d_model: int, d_key: int, d_val: int):
-        super().__init__()
-        self.softmax = nn.Softmax(-1)
-
-        self.q_proj = nn.Linear(d_model, d_key, bias=False)
-        self.k_proj = nn.Linear(d_model, d_key, bias=False)
-        self.v_proj = nn.Linear(d_model, d_val, bias=False)
-
     def forward(self, x: Tensor, mask: BoolTensor = None):
-        # x:           [B, T, d_model]
-        # mask: [B, T, T] or [1, T, T], True = ignore
-        Q, K, V = self.q_proj(x), self.k_proj(x), self.v_proj(x) # Q, K, V: [B, T, d_key], [B, T, d_key], [B, T, d_val]
-        d_key, d_val = K.size(-1), V.size(-1)
-        attn_scores = torch.matmul(Q, torch.transpose(K, -1, -2)) / math.sqrt(d_key)
-        # attn_scores: [B, T, T]
-        if mask is not None:
-            attn_scores = attn_scores.masked_fill(mask, float('-inf'))
-        # softmax(attn_scores): [B, T, T]
-        return torch.matmul(self.softmax(attn_scores), V)
-        # output:      [B, T, d_val]
+        # x: [B, T, d_model], mask: [B, T, T] or [1, T, T]
+        return self.out_proj(torch.cat([head(x, mask) for head in self.heads], dim=-1))  # [B, T, d_model]
+
 
 class CrossAttentionTransformerBlock(nn.Module):
     def __init__(self, d_model: int, d_ff: int, n_heads: int):
@@ -126,14 +131,13 @@ class CrossAttentionTransformerBlock(nn.Module):
         self.feed_forward = FeedForward(d_model, d_ff)
 
     def forward(self, src: Tensor, tgt: Tensor, src_mask: BoolTensor = None, tgt_mask: BoolTensor = None):
-        # tgt_mask: [B, T_tgt, T_tgt] causal+padding mask for self-attention over tgt
-        # src_mask: [B, 1, T_src] padding mask for cross-attention over src
-        carry = self.multi_head_self_attn(self.layer_norm1(tgt), tgt_mask)  # [B, T_tgt, d_model]
-        tgt = carry + tgt
-        carry = self.multi_head_cross_attn(src, self.layer_norm2(tgt), src_mask)
-        tgt = carry + tgt
-        carry = self.feed_forward(self.layer_norm3(tgt))
-        tgt = carry + tgt
+        # src: [B, T_src, d_model], tgt: [B, T_tgt, d_model], src_mask: [B, 1, T_src], tgt_mask: [B, T_tgt, T_tgt]
+        carry = self.multi_head_self_attn(self.layer_norm1(tgt), tgt_mask)    # [B, T_tgt, d_model]
+        tgt = carry + tgt                                                     # [B, T_tgt, d_model]
+        carry = self.multi_head_cross_attn(src, self.layer_norm2(tgt), src_mask)  # [B, T_tgt, d_model]
+        tgt = carry + tgt                                                     # [B, T_tgt, d_model]
+        carry = self.feed_forward(self.layer_norm3(tgt))                      # [B, T_tgt, d_model]
+        tgt = carry + tgt                                                     # [B, T_tgt, d_model]
         return tgt
 
 
@@ -146,7 +150,7 @@ class TransformerBlock(nn.Module):
         self.feed_forward = FeedForward(d_model, d_ff)
 
     def forward(self, x: Tensor, mask: BoolTensor = None):
-        # x:     [B, T, d_model]
+        # x: [B, T, d_model], mask: [B, T, T] or [1, T, T]
         carry = self.multi_head_attn(self.layer_norm1(x), mask)  # [B, T, d_model]
         x = carry + x                                            # [B, T, d_model]
         carry = self.feed_forward(self.layer_norm2(x))           # [B, T, d_model]
@@ -154,14 +158,14 @@ class TransformerBlock(nn.Module):
         return x
 
 
-
 class DecoderOnlyTransformer(nn.Module):
     """
     An autoregressive, GPT-style, decoder-only transformer for text generation purposes.
+    Importantly, returns outputs with dimension vocab_size, i.e. logits.
     Stand-alone, can be used on its own.
     """
     def __init__(
-            self, 
+            self,
             vocab_size: int,
             max_seq_len: int,
             d_model: int,
@@ -182,27 +186,26 @@ class DecoderOnlyTransformer(nn.Module):
         self.unembedding.weight = self.embedding.weight
 
     def forward(self, x: Tensor, pad_mask: BoolTensor = None):
-        # x:        [B, T]  (token indices)
-        # pad_mask: [B, 1, T], True = padding position (optional)
+        # x: [B, T] (token indices), pad_mask: [B, 1, T] (optional, True = padding)
         T = x.size(1)
-        # causal mask: upper triangle is True (future positions to ignore), shape [1, T, T]
-        causal_mask = torch.ones(T, T, dtype=torch.bool, device=x.device).triu(1).unsqueeze(0)
-        mask = causal_mask | pad_mask if pad_mask is not None else causal_mask
-        x = self.pos_encoding(self.embedding(x))    # [B, T, d_model]
+        causal_mask = torch.ones(T, T, dtype=torch.bool, device=x.device).triu(1).unsqueeze(0)  # [1, T, T]
+        mask = causal_mask | pad_mask if pad_mask is not None else causal_mask                  # [B, T, T]
+        x = self.pos_encoding(self.embedding(x))  # [B, T, d_model]
         for attn_blk in self.attn_blocks:
-            x = attn_blk(x, mask)   # [B, T, d_model]
-        x = self.final_layer_norm(x)
-        x = self.unembedding(x)     # [B, T, vocab_size]
+            x = attn_blk(x, mask)                 # [B, T, d_model]
+        x = self.final_layer_norm(x)              # [B, T, d_model]
+        x = self.unembedding(x)                   # [B, T, vocab_size]
         return x
 
 
 class EncoderTransformer(nn.Module):
     """
     An encoder Transformer, with BERT-style bidirectionality.
+    Importantly, returns outputs with dimension d_model, i.e. same as the input embeddings.
     Stand-alone, can be used on its own.
     """
     def __init__(
-            self, 
+            self,
             vocab_size: int,
             max_seq_len: int,
             d_model: int,
@@ -220,20 +223,22 @@ class EncoderTransformer(nn.Module):
         self.final_layer_norm = nn.LayerNorm(d_model)
 
     def forward(self, x: Tensor, mask: BoolTensor = None):
-        # x:                [B, T]  (token indices)
-        x = self.pos_encoding(self.embedding(x))    # [B, T, d_model]
-        for attn_blk in self.attn_blocks:  # repeated n_blocks times
-            x = attn_blk(x, mask)   # [B, T, d_model]
-        x = self.final_layer_norm(x)  # [B, T, d_model]
+        # x: [B, T] (token indices), mask: [B, 1, T] (optional, True = padding)
+        x = self.pos_encoding(self.embedding(x))  # [B, T, d_model]
+        for attn_blk in self.attn_blocks:
+            x = attn_blk(x, mask)                 # [B, T, d_model]
+        x = self.final_layer_norm(x)              # [B, T, d_model]
         return x
+
 
 class DecoderTransformer(nn.Module):
     """
     A decoder Transformer, which assumes that the src argument already consists of encoded vectors.
+    Importantly, returns outputs with dimension vocab_size, i.e. logits.
     Not for stand-alone use.
     """
     def __init__(
-            self, 
+            self,
             vocab_size: int,
             max_seq_len: int,
             d_model: int,
@@ -254,20 +259,23 @@ class DecoderTransformer(nn.Module):
         self.unembedding.weight = self.embedding.weight
 
     def forward(self, src: Tensor, tgt: Tensor, src_mask: BoolTensor = None, tgt_mask: BoolTensor = None):
-        tgt = self.pos_encoding(self.embedding(tgt))    # [B, T_tgt, d_model]
+        # src: [B, T_src, d_model] (encoded), tgt: [B, T_tgt] (token indices), src_mask: [B, 1, T_src], tgt_mask: [B, T_tgt, T_tgt]
+        tgt = self.pos_encoding(self.embedding(tgt))      # [B, T_tgt, d_model]
         for attn_blk in self.attn_blocks:
-            tgt = attn_blk(src, tgt, src_mask, tgt_mask)   # [B, T_tgt, d_model]
-        tgt = self.final_layer_norm(tgt)
-        tgt = self.unembedding(tgt)         # [B, T_tgt, vocab_size]
+            tgt = attn_blk(src, tgt, src_mask, tgt_mask)  # [B, T_tgt, d_model]
+        tgt = self.final_layer_norm(tgt)                  # [B, T_tgt, d_model]
+        tgt = self.unembedding(tgt)                       # [B, T_tgt, vocab_size]
         return tgt
+
 
 class EncoderDecoderTransformer(nn.Module):
     """
     An encoder-decoder Transformer.
+    Importantly, returns outputs with dimension vocab_size, i.e. logits.
     Stand-alone, can be used on its own.
     """
     def __init__(
-            self, 
+            self,
             vocab_size: int,
             max_seq_len: int,
             d_model: int,
@@ -281,9 +289,6 @@ class EncoderDecoderTransformer(nn.Module):
         self.encoder = EncoderTransformer(vocab_size, max_seq_len, d_model, d_ff, n_heads, n_blocks_encoder)
         self.decoder = DecoderTransformer(vocab_size, max_seq_len, d_model, d_ff, n_heads, n_blocks_decoder)
 
-
     def forward(self, src: Tensor, tgt: Tensor, src_mask: BoolTensor = None, tgt_mask: BoolTensor = None):
-        # src_mask: [B, 1, T_src] padding mask applied in cross-attention and encoder self-attention
-        # tgt_mask: [B, T_tgt, T_tgt] causal+padding mask for decoder self-attention
-        return self.decoder(self.encoder(src, src_mask), tgt, src_mask, tgt_mask)
-    
+        # src: [B, T_src] (token indices), tgt: [B, T_tgt] (token indices), src_mask: [B, 1, T_src], tgt_mask: [B, T_tgt, T_tgt]
+        return self.decoder(self.encoder(src, src_mask), tgt, src_mask, tgt_mask)  # [B, T_tgt, vocab_size]
