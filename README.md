@@ -20,7 +20,7 @@ pip install -r requirements.txt
 
 ## Modules
 
-`model.py` provides three stand-alone models and the building blocks they are composed of.
+The `transformer_variants` package provides three stand-alone models and the building blocks they are composed of.
 
 | Class | Description |
 |---|---|
@@ -33,7 +33,7 @@ pip install -r requirements.txt
 
 ```python
 import torch
-from model import EncoderTransformer, DecoderOnlyTransformer, EncoderDecoderTransformer
+from transformer_variants import EncoderTransformer, DecoderOnlyTransformer, EncoderDecoderTransformer
 
 VOCAB_SIZE, MAX_SEQ_LEN = 32000, 512
 D_MODEL, D_FF, N_HEADS, N_BLOCKS = 512, 2048, 8, 6
@@ -44,10 +44,10 @@ D_MODEL, D_FF, N_HEADS, N_BLOCKS = 512, 2048, 8, 6
 ```python
 model = EncoderTransformer(VOCAB_SIZE, MAX_SEQ_LEN, D_MODEL, D_FF, N_HEADS, N_BLOCKS)
 
-src = torch.randint(0, VOCAB_SIZE, (B, T_src))          # [B, T_src]
-src_mask = (src == pad_id).unsqueeze(1)                 # [B, 1, T_src]  True = padding
+src = torch.randint(0, VOCAB_SIZE, (B, T_src))                        # [B, T_src]
+src_mask = (src == pad_id).unsqueeze(1).expand(-1, T_src, -1)         # [B, T_src, T_src]  True = padding
 
-out = model(src, src_mask)                              # [B, T_src, d_model]
+out = model(src, src_mask)                                            # [B, T_src, d_model]
 ```
 
 ### Decoder-only

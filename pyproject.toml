@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "transformers-from-scratch"
-version = "0.1.0"
+version = "0.1.2"
 description = "Encoder, decoder, and encoder-decoder Transformer architectures in PyTorch"
 readme = "README.md"
 license = "MIT"
